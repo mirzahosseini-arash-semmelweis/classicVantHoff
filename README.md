@@ -13,7 +13,8 @@ This directory contains all R code scripts for the HPLC chromatographic data pro
 ├── read_analyze_data/
 │   ├── run_batch_chromReader.R        # Script for batch-reading raw HPLC chromatograms
 │   └── analyze_classic_vantHoff.R     # Script executing the van 't Hoff workflow
-├── data/                              # To be populated with your chromatograms
+│   └── validate_classic_vantHoff.R    # Script executing the validation of error propagation
+├── data/                              # Sample raw chromatogram files (.arw)
 └── README.md                          # This documentation file
 ```
 
@@ -26,7 +27,8 @@ This directory contains all R code scripts for the HPLC chromatographic data pro
 | **`classicVantHoff/classic_vantHoff_analyzer.R`** | Contains the core implementation and mathematical functions for classic van 't Hoff modeling and thermodynamic parameter extraction ($\Delta H^\circ$, $\Delta S^\circ$). |
 | **`read_analyze_data/run_batch_chromReader.R`** | Script designed to batch-process raw HPLC chromatograms located in the `data/` directory using the `autoChromReader` engine. |
 | **`read_analyze_data/analyze_classic_vantHoff.R`** | Main analysis pipeline script that processes parsed data, fits thermodynamic models, and generates figures/results. |
-| **`data/`** | Folder containing raw chromatographic data files (e.g., `.arw` formats across multiple detection wavelengths). |
+| **`read_analyze_data/validate_classic_vantHoff.R`** | Validation analysis that gauges sensitivity of fit workflow. |
+| **`data/`** | Folder containing raw sample chromatographic data files (e.g., `.arw` formats across multiple detection wavelengths). |
 
 ---
 
