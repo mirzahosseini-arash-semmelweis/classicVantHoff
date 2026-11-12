@@ -1,6 +1,10 @@
 ## ---------------------------------------------------------------------------
 ## classic_vantHoff_analyzer.R -- Folder-level HPLC thermodynamic analysis.
+##
+## Repository: https://github.com/mirzahosseini-arash-semmelweis/classicVantHoff
 ## ---------------------------------------------------------------------------
+
+VH_ANALYZER_VERSION <- "1.1.0"
 
 suppressWarnings(
   suppressPackageStartupMessages({
@@ -14,6 +18,61 @@ suppressWarnings(
 )
 
 # ---------- Prepare data -----------------------------------------------------
+
+# Join a user-supplied lookup table (t0 or phase ratio).
+# The table may be keyed by ANY subset of `condition_cols` (e.g. only
+# columnID) and, if `allow_temp = TRUE`, additionally by temp_C, so that
+# column-specific and temperature-dependent hold-up times can be supplied.
+.vh_join_lookup <- function(
+    x,
+    tab,
+    value_col,
+    new_name,
+    condition_cols,
+    arg_name,
+    allow_temp = TRUE
+) {
+
+  candidate_keys <- if (allow_temp) c(condition_cols, "temp_C") else condition_cols
+  key_cols       <- intersect(candidate_keys, names(tab))
+
+  if (!value_col %in% names(tab) || length(key_cols) == 0L) {
+    stop(
+      "`", arg_name, "` must contain '", value_col, "' and at least one key ",
+      "column out of: ", paste(candidate_keys, collapse = ", ")
+    )
+  }
+
+  tab <- tab |>
+    select(all_of(c(key_cols, value_col))) |>
+    distinct()
+
+  n_dup <- tab |>
+    count(across(all_of(key_cols))) |>
+    filter(n > 1L) |>
+    nrow()
+
+  if (n_dup > 0L) {
+    stop("`", arg_name, "` contains more than one value for ", n_dup,
+         " key combination(s) of: ", paste(key_cols, collapse = ", "))
+  }
+
+  if (new_name != value_col) {
+    tab <- tab |> rename(!!new_name := all_of(value_col))
+  }
+
+  x <- x |>
+    select(-any_of(new_name)) |>
+    left_join(tab, by = key_cols)
+
+  n_miss <- sum(!is.finite(x[[new_name]]))
+  if (n_miss > 0L) {
+    warning(n_miss, " row(s) have no finite value in `", arg_name,
+            "` after joining by ", paste(key_cols, collapse = ", "), ".")
+  }
+
+  x
+}
 
 vh_assign_peak_identity_by_area <- function(
     data,
@@ -175,16 +234,17 @@ vh_prepare <- function(
     if (is.numeric(t0_external) && length(t0_external) == 1L) {
       x <- x |> mutate(t0 = t0_external)
     } else if (is.data.frame(t0_external)) {
-      if (!all(c(condition_cols, "t0") %in% names(t0_external))) {
-        stop("`t0_external` must contain 't0' and all specified `condition_cols`: ", 
-             paste(setdiff(c(condition_cols, "t0"), names(t0_external)), collapse = ", "))
-      }
-      join_by_cols <- intersect(condition_cols, names(t0_external))
-      x <- x |> 
-        left_join(
-          t0_external |> select(all_of(c(join_by_cols, "t0"))), 
-          by = join_by_cols
-        )
+      x <- .vh_join_lookup(
+        x              = x,
+        tab            = t0_external,
+        value_col      = "t0",
+        new_name       = "t0",
+        condition_cols = condition_cols,
+        arg_name       = "t0_external",
+        allow_temp     = TRUE
+      )
+    } else {
+      stop("`t0_external` must be a single number or a data frame.")
     }
     
     # Calculate k dynamically for all tR columns found
@@ -214,18 +274,15 @@ vh_prepare <- function(
     if (is.numeric(phase_ratio) && length(phase_ratio) == 1L) {
       x <- x |> mutate(phase_ratio = phase_ratio)
     } else if (is.data.frame(phase_ratio)) {
-      if (!all(c(condition_cols, "phi") %in% names(phase_ratio))) {
-        stop("`phase_ratio` must contain 'phi' and all specified `condition_cols`: ", 
-             paste(setdiff(c(condition_cols, "phi"), names(phase_ratio)), collapse = ", "))
-      }
-      join_by_cols <- intersect(condition_cols, names(phase_ratio))
-      x <- x |> 
-        left_join(
-          phase_ratio |> 
-            select(all_of(c(join_by_cols, "phi"))) |> 
-            rename(phase_ratio = phi), 
-          by = join_by_cols
-        )
+      x <- .vh_join_lookup(
+        x              = x,
+        tab            = phase_ratio,
+        value_col      = "phi",
+        new_name       = "phase_ratio",
+        condition_cols = condition_cols,
+        arg_name       = "phase_ratio",
+        allow_temp     = FALSE
+      )
     }
   }
   
@@ -418,13 +475,13 @@ vh_temperature_summary <- function(
         NA_real_
       },
       
-      ln_k    = mean(ln_k, na.rm = TRUE),
       sd_ln_k = if (n() > 1) {
         sd(ln_k, na.rm = TRUE)
       } else {
         NA_real_
       },
-      
+      ln_k    = mean(ln_k, na.rm = TRUE),
+
       k      = exp(ln_k),
       n_runs = n(),
       
@@ -524,40 +581,51 @@ vh_complete_missing_peak2 <- function(
 
 vh_fit_one <- function(
     d,
-    min_temps  = 3,
-    min_span_C = 10,
-    r2_warn    = 0.95
+    min_temps            = 3,
+    min_span_C           = 10,
+    r2_warn              = 0.95,
+    sigma_ref            = NA_real_,
+    excess_scatter_alpha = 0.01,
+    t0_rel_uncertainty   = NULL,     # e.g. 0.02 = 2 % standard uncertainty
+    conf_level           = 0.95
 ) {
-  
+
   Rgas <- 8.314462618# J / (mol * K)
-  
+
   n_temp    <- n_distinct(d$temp_C)
   temp_span <- diff(range(d$temp_C))
-  
+
   if (n_temp < min_temps) {
     return(
       list(
         model = NULL,
         stats = tibble(
-          n_temp             = n_temp,
-          n_runs             = sum(d$n_runs),
-          temp_min_C         = min(d$temp_C),
-          temp_max_C         = max(d$temp_C),
-          temp_span_C        = temp_span,
-          intercept          = NA_real_,
-          intercept_se       = NA_real_,
-          slope              = NA_real_,
-          slope_se           = NA_real_,
-          deltaH_kJ_mol      = NA_real_,
-          deltaH_se_kJ_mol   = NA_real_,
-          deltaS_J_mol_K     = NA_real_,
-          deltaS_se_J_mol_K  = NA_real_,
-          deltaG_kJ_mol      = NA_real_,
-          deltaG_se_kJ_mol   = NA_real_,
-          r2                 = NA_real_,
-          adj_r2             = NA_real_,
-          rmse_ln_k          = NA_real_,
-          status             = "too_few_temperatures"
+          n_temp                        = n_temp,
+          n_runs                        = sum(d$n_runs),
+          temp_min_C                    = min(d$temp_C),
+          temp_max_C                    = max(d$temp_C),
+          temp_span_C                   = temp_span,
+          intercept                     = NA_real_,
+          intercept_se                  = NA_real_,
+          slope                         = NA_real_,
+          slope_se                      = NA_real_,
+          slope_p                       = NA_real_,
+          deltaH_kJ_mol                 = NA_real_,
+          deltaH_se_kJ_mol              = NA_real_,
+          deltaH_ci_low_kJ_mol          = NA_real_,
+          deltaH_ci_high_kJ_mol         = NA_real_,
+          deltaH_t0_sens_kJ_mol_per_pct = NA_real_,
+          deltaH_se_total_kJ_mol        = NA_real_,
+          deltaS_J_mol_K                = NA_real_,
+          deltaS_se_J_mol_K             = NA_real_,
+          deltaG_kJ_mol                 = NA_real_,
+          deltaG_se_kJ_mol              = NA_real_,
+          r2                            = NA_real_,
+          adj_r2                        = NA_real_,
+          rmse_ln_k                     = NA_real_,
+          scatter_ratio                 = NA_real_,
+          scatter_p                     = NA_real_,
+          status                        = "too_few_temperatures"
         )
       )
     )
@@ -583,7 +651,33 @@ vh_fit_one <- function(
   # invT_1000 = 1000/T => slope = -deltaH / (1000 * R)
   deltaH    <- -slope * 1000 * Rgas / 1000 # returns kJ/mol
   deltaH_se <- slope_se * 1000 * Rgas / 1000
-  
+
+  # Significance of the slope and t-based confidence interval of deltaH.
+  df_res  <- df.residual(mod)
+  slope_p <- co["invT_1000", "Pr(>|t|)"]
+  t_q     <- if (df_res > 0) qt(1 - (1 - conf_level) / 2, df_res) else NA_real_
+  deltaH_ci_low  <- deltaH - t_q * deltaH_se
+  deltaH_ci_high <- deltaH + t_q * deltaH_se
+
+  # First-order propagation of a hold-up-time error into deltaH.
+  # For k = (tR - t0)/t0: d ln k / d ln t0 = -(1 + k)/k. A relative t0 error
+  # that is common to all temperatures of a series shifts each ln k by a
+  # k-dependent amount; regressing that shift on 1000/T gives the change of
+  # the slope, hence of deltaH, per unit relative t0 error.
+  g_t0 <- -(1 + d$k) / d$k
+  dslope_dlnt0 <- if (all(is.finite(g_t0))) {
+    unname(coef(lm(g_t0 ~ d$invT_1000))[2])
+  } else {
+    NA_real_
+  }
+  deltaH_t0_sens <- -Rgas * dslope_dlnt0 * 0.01 # kJ/mol per +1 % in t0
+
+  deltaH_se_total <- if (!is.null(t0_rel_uncertainty) && is.finite(deltaH_t0_sens)) {
+    sqrt(deltaH_se^2 + (deltaH_t0_sens * 100 * t0_rel_uncertainty)^2)
+  } else {
+    deltaH_se
+  }
+
   deltaS       <- NA_real_
   deltaS_se    <- NA_real_
   deltaG       <- NA_real_
@@ -618,11 +712,27 @@ vh_fit_one <- function(
   # ------------------------------------------------------------
   
   flags <- character()
-  
+
   if (n_temp == 3)            {flags <- c(flags, "only_3_temperatures")}
   if (temp_span < min_span_C) {flags <- c(flags, "narrow_temperature_span")}
   if (sm$r.squared < r2_warn) {flags <- c(flags, "low_R2")}
-  
+
+  # Baseline-aware lack-of-fit check. R^2 depends on the slope
+  # magnitude and is a poor linearity criterion for 3-4 points. Instead, the
+  # residual variance of the series is compared with the dataset-level
+  # reference variance: (n - 2) s^2 / sigma_ref^2 ~ chi^2(n - 2).
+  scatter_ratio <- NA_real_
+  scatter_p     <- NA_real_
+
+  if (is.finite(sigma_ref) && sigma_ref > 0 && df_res > 0) {
+    scatter_ratio <- sigma(mod) / sigma_ref
+    scatter_p     <- pchisq(df_res * scatter_ratio^2, df = df_res, lower.tail = FALSE)
+
+    if (scatter_p < excess_scatter_alpha) {
+      flags <- c(flags, "excess_scatter")
+    }
+  }
+
   status <- if (length(flags) == 0) {
     "ok"
   }
@@ -645,10 +755,17 @@ vh_fit_one <- function(
       intercept_se = intercept_se,
       slope        = slope,
       slope_se     = slope_se,
-      
+      slope_p      = slope_p,
+
       deltaH_kJ_mol    = deltaH,
       deltaH_se_kJ_mol = deltaH_se,
-      
+
+      deltaH_ci_low_kJ_mol  = deltaH_ci_low,
+      deltaH_ci_high_kJ_mol = deltaH_ci_high,
+
+      deltaH_t0_sens_kJ_mol_per_pct = deltaH_t0_sens,
+      deltaH_se_total_kJ_mol        = deltaH_se_total,
+
       deltaS_J_mol_K    = deltaS,
       deltaS_se_J_mol_K = deltaS_se,
       
@@ -658,7 +775,10 @@ vh_fit_one <- function(
       r2        = sm$r.squared,
       adj_r2    = sm$adj.r.squared,
       rmse_ln_k = sigma(mod),
-      
+
+      scatter_ratio = scatter_ratio,
+      scatter_p     = scatter_p,
+
       status = status
     )
   )
@@ -668,14 +788,26 @@ vh_flag_outliers_one <- function(
     d,
     min_temps       = 3,
     rstudent_cutoff = 3,
-    max_outliers    = 1
+    max_outliers    = 1,
+    sigma_ref       = NA_real_,
+    ref_cutoff      = 3
 ) {
-  
+
+  # With 4 temperatures the externally studentized residual
+  # has a single residual degree of freedom (t distribution with 1 df), so
+  # |r*| > 3 alone is exceeded by the most deviating point of ~73 % of
+  # perfectly linear, normally distributed series. When `sigma_ref` (a
+  # dataset-level reference scale of ln k residuals) is finite, a point is
+  # only excluded if it is ALSO improbable relative to that reference:
+  #   |e_i| / (sigma_ref * sqrt(1 - h_ii)) > ref_cutoff.
+  # sigma_ref = NA reproduces the version 1.0 behaviour.
+
   d <- d |>
     mutate(
       .vh_outlier           = FALSE,
       .vh_outlier_iteration = NA_integer_,
       .vh_rstudent          = NA_real_,
+      .vh_z_ref             = NA_real_, # [NEW v1.1]
       .vh_cooks             = NA_real_
     )
   
@@ -714,15 +846,29 @@ vh_flag_outliers_one <- function(
     
     rs <- suppressWarnings(rstudent(mod))
     cd <- cooks.distance(mod)
-    
+
     d$.vh_rstudent[idx] <- rs
     d$.vh_cooks[idx]    <- cd
-    
+
+    # Standardized residual relative to the reference scale
+    use_ref <- is.finite(sigma_ref) && sigma_ref > 0
+    z_ref   <- if (use_ref) {
+      resid(mod) / (sigma_ref * sqrt(1 - hatvalues(mod)))
+    } else {
+      rep(NA_real_, length(idx))
+    }
+    d$.vh_z_ref[idx] <- z_ref
+
     score                    <- abs(rs)
     score[!is.finite(score)] <- -Inf
-    
+
+    # Only points passing the reference gate are candidates
+    if (use_ref) {
+      score[!(abs(z_ref) > ref_cutoff)] <- -Inf
+    }
+
     j_local <- which.max(score)
-    
+
     if (
       length(j_local) == 0 ||
       score[j_local] <= rstudent_cutoff
@@ -1158,7 +1304,7 @@ vh_reconcile_two_peak_identity <- function(
   )
   
   if (!detect_crossing) {
-    
+
     data2 <- data2 |>
       select(-any_of("series_id")) |>
       group_by(
@@ -1170,11 +1316,20 @@ vh_reconcile_two_peak_identity <- function(
         series_id = cur_group_id()
       ) |>
       ungroup()
-    
+
+    diagnostics <- data2 |>
+      group_by(across(all_of(condition_cols))) |>
+      summarise(
+        crossing_test_status = "disabled",
+        crossing_detected    = FALSE,
+        peak2_imputed_n      = sum(.vh_peak2_imputed %in% TRUE),
+        .groups              = "drop"
+      )
+
     return(
       list(
         data        = data2,
-        diagnostics = tibble()
+        diagnostics = diagnostics
       )
     )
   }
@@ -1240,6 +1395,44 @@ vh_reconcile_two_peak_identity <- function(
   )
 }
 
+# Dataset-level ("baseline") residual scale of ln k.
+#
+# Every series with >= `min_temps` observed temperatures is fitted by OLS and
+# its residuals are standardized by sqrt(1 - h_ii), which gives them the
+# common variance sigma^2 under the linear model. The pooled scale is the
+# normal-consistent median absolute value (1.4826 * median |.|), which is
+# insensitive to the few genuine artefacts present in the pool. Points that
+# were imputed by coelution completion are not used.
+vh_reference_scale <- function(
+    data,
+    series_cols,
+    min_temps = 4L
+) {
+
+  d <- data
+  if (".vh_peak2_imputed" %in% names(d)) {
+    d <- d |> filter(!.vh_peak2_imputed %in% TRUE)
+  }
+
+  z <- d |>
+    filter(is.finite(ln_k), is.finite(invT_1000)) |>
+    group_by(across(all_of(series_cols))) |>
+    group_modify(function(s, key) {
+      if (n_distinct(s$temp_C) < min_temps) return(tibble(z = numeric()))
+      m <- lm(ln_k ~ invT_1000, data = s)
+      tibble(z = resid(m) / sqrt(1 - hatvalues(m)))
+    }) |>
+    ungroup() |>
+    pull(z)
+
+  z <- z[is.finite(z)]
+
+  list(
+    sigma_ref = if (length(z) >= 10L) 1.4826 * median(abs(z)) else NA_real_,
+    n_points  = length(z)
+  )
+}
+
 vh_fit <- function(
     data,
     condition_cols = c(
@@ -1259,7 +1452,12 @@ vh_fit <- function(
     min_peak2_observed_temps  = 1L,
     detect_peak_crossing      = TRUE,
     crossing_sse_ratio_cutoff = 0.5,
-    crossing_min_temps        = 4L
+    crossing_min_temps        = 4L,
+    outlier_scale             = "pooled", # "pooled", a number (ln k units), or "none"
+    ref_cutoff                = 3,
+    excess_scatter_alpha      = 0.01,
+    t0_rel_uncertainty        = NULL,
+    conf_level                = 0.95
 ) {
 
   # ------------------------------------------------------------
@@ -1289,6 +1487,24 @@ vh_fit <- function(
     "peak"
   )
 
+  # ------------------------------------------------------------
+  # Reference (baseline) residual scale
+  # ------------------------------------------------------------
+
+  sigma_ref_n <- NA_integer_
+
+  sigma_ref <- if (is.numeric(outlier_scale) && length(outlier_scale) == 1L) {
+    outlier_scale
+  } else if (identical(outlier_scale, "pooled")) {
+    rs <- vh_reference_scale(data, series_cols = series_cols, min_temps = 4L)
+    sigma_ref_n <- rs$n_points
+    rs$sigma_ref
+  } else if (identical(outlier_scale, "none")) {
+    NA_real_
+  } else {
+    stop("`outlier_scale` must be \"pooled\", \"none\" or a single positive number.")
+  }
+
   nested <- data |>
     group_by(across(all_of(series_cols))) |>
     nest() |>
@@ -1306,7 +1522,9 @@ vh_fit <- function(
         vh_flag_outliers_one,
         min_temps       = min_temps,
         rstudent_cutoff = rstudent_cutoff,
-        max_outliers    = max_outliers
+        max_outliers    = max_outliers,
+        sigma_ref       = sigma_ref,
+        ref_cutoff      = ref_cutoff
       ),
 
       # ----------------------------------------------------------
@@ -1326,9 +1544,13 @@ vh_fit <- function(
       fit_object = map(
         fit_data,
         vh_fit_one,
-        min_temps  = min_temps,
-        min_span_C = min_span_C,
-        r2_warn    = r2_warn
+        min_temps            = min_temps,
+        min_span_C           = min_span_C,
+        r2_warn              = r2_warn,
+        sigma_ref            = sigma_ref,
+        excess_scatter_alpha = excess_scatter_alpha,
+        t0_rel_uncertainty   = t0_rel_uncertainty,
+        conf_level           = conf_level
       ),
 
       model = map(
@@ -1378,6 +1600,12 @@ vh_fit <- function(
       n_outliers = map_int(
         data,
         ~ sum(.x$.vh_outlier, na.rm = TRUE)
+      ),
+
+      # Coelution-completed points used in the final model
+      n_imputed = map_int(
+        fit_data,
+        ~ {if (".vh_peak2_imputed" %in% names(.x)) sum(.x$.vh_peak2_imputed %in% TRUE) else 0L}
       )
     ) |>
     select(-fit_object) |>
@@ -1470,15 +1698,20 @@ vh_fit <- function(
           strsplit(status, "; ", fixed = TRUE)[[1]]
         }
         
-        if (isTRUE(crossing_detected)) {
+        if (isTRUE(get0("crossing_detected", ifnotfound = FALSE))) {
           fl <- c(fl, "peak_order_crossing_corrected")
         }
-        
-        if (
-          is.finite(peak2_imputed_n) &&
-          peak2_imputed_n > 0
-        ) {
+
+        if (n_imputed > 0) {
           fl <- c(fl, "peak2_coelution_imputed")
+        }
+
+        # Completed points are copies of Peak 1. When they are at
+        # least as many as the independently observed Peak 2 points, the
+        # Peak 2 slope is dominated by Peak 1 and Delta Delta H is biased
+        # towards zero.
+        if (n_imputed > 0 && is.finite(n_temp) && n_imputed >= n_temp - n_imputed) {
+          fl <- c(fl, "peak2_mostly_imputed")
         }
         
         fl <- unique(fl)
@@ -1498,8 +1731,148 @@ vh_fit <- function(
     models                    = fitted,
     predictions               = predictions,
     peak_identity_diagnostics = peak_identity_diagnostics,
-    condition_cols            = condition_cols
+    condition_cols            = condition_cols,
+    sigma_ref                 = sigma_ref,
+    sigma_ref_n               = sigma_ref_n,
+    version                   = VH_ANALYZER_VERSION
   )
+}
+
+# ---------- Diagnostics and summaries ----------------------------------------
+
+# Fit-status summary: one row per category, counts of van't Hoff series.
+vh_fit_status_summary <- function(vh) {
+
+  r <- vh$results
+
+  has_flag <- function(flag) grepl(flag, r$status, fixed = TRUE)
+  fitted   <- is.finite(r$slope)
+
+  imp_pts <- sum(r$n_imputed, na.rm = TRUE)
+
+  tibble::tribble(
+    ~category,                                               ~n_series,
+    "Series (compound x column x eluent x peak)",            nrow(r),
+    "  Peak 1 / Peak 2",                                     NA_integer_,
+    "Observed temperatures: 4",                              sum(r$n_temp_total == 4),
+    "Observed temperatures: 3",                              sum(r$n_temp_total == 3),
+    "Observed temperatures: < 3 (not fitted)",               sum(r$n_temp_total < 3),
+    "Fitted series",                                         sum(fitted),
+    "  one point excluded as anomalous (4 -> 3)",            sum(r$n_outliers > 0),
+    "  final fit on 4 temperatures",                         sum(fitted & r$n_temp == 4),
+    "  final fit on 3 temperatures",                         sum(fitted & r$n_temp == 3),
+    "  R^2 < r2_warn (low_R2)",                              sum(has_flag("low_R2")),
+    "  excess residual scatter (excess_scatter)",            sum(has_flag("excess_scatter")),
+    "  slope not significant (p > 0.05)",                    sum(fitted & r$slope_p > 0.05, na.rm = TRUE),
+    "  Peak 2 series with coelution-completed points",       sum(has_flag("peak2_coelution_imputed")),
+    "    of which completed points >= observed points",      sum(has_flag("peak2_mostly_imputed")),
+    "  series relabelled after elution-order crossing",      sum(has_flag("peak_order_crossing_corrected")),
+    "  status 'ok' (no flag)",                               sum(r$status == "ok"),
+    "Coelution-completed Peak 2 points used in fits",        imp_pts
+  ) |>
+    mutate(
+      n_series = if_else(
+        category == "  Peak 1 / Peak 2",
+        NA_integer_,
+        as.integer(n_series)
+      ),
+      detail = if_else(
+        category == "  Peak 1 / Peak 2",
+        paste(sum(r$peak == "Peak 1"), "/", sum(r$peak == "Peak 2")),
+        NA_character_
+      )
+    )
+}
+
+# Shared (condition-wide) residual check. Final-model residuals of retained
+# observations of all series with >= `min_temps` temperatures are pooled by
+# `by` x temperature. A median residual that is consistently signed across
+# many independent series indicates a systematic, analyte-independent effect
+# (e.g. a temperature-specific flow, temperature or hold-up deviation) rather
+# than an analyte-specific anomaly. A two-sided sign test is reported.
+vh_shared_residual_check <- function(
+    vh,
+    by        = "eluentID",
+    min_temps = 4L
+) {
+
+  series_cols <- c(vh$condition_cols, "peak")
+
+  keep <- vh$results |>
+    filter(n_temp >= min_temps) |>
+    select(all_of(series_cols))
+
+  d <- vh$data |>
+    semi_join(keep, by = series_cols) |>
+    filter(!.vh_outlier, is.finite(.vh_final_resid))
+
+  if (".vh_peak2_imputed" %in% names(d)) {
+    d <- d |> filter(!.vh_peak2_imputed %in% TRUE)
+  }
+
+  d |>
+    group_by(across(all_of(c(by, "temp_C")))) |>
+    summarise(
+      n_series      = n(),
+      median_resid  = median(.vh_final_resid),
+      mean_resid    = mean(.vh_final_resid),
+      frac_positive = mean(.vh_final_resid > 0),
+      sign_test_p   = if (n() > 0) {
+        binom.test(sum(.vh_final_resid > 0), n(), 0.5)$p.value
+      } else {
+        NA_real_
+      },
+      .groups = "drop"
+    )
+}
+
+# Series-by-series comparison of two vh_fit() results, e.g. with/without
+# coelution completion, outlier screening or a different t0.
+vh_compare_fits <- function(
+    vh_ref,
+    vh_alt,
+    labels = c("ref", "alt")
+) {
+
+  series_cols <- c(vh_ref$condition_cols, "peak")
+  keep_cols   <- c(series_cols, "n_temp", "n_outliers", "deltaH_kJ_mol",
+                   "deltaH_se_kJ_mol", "r2", "status")
+
+  a <- vh_ref$results |> select(any_of(keep_cols))
+  b <- vh_alt$results |> select(any_of(keep_cols))
+
+  full_join(
+    a, b,
+    by     = series_cols,
+    suffix = paste0("_", labels)
+  ) |>
+    mutate(
+      deltaH_diff_kJ_mol =
+        .data[[paste0("deltaH_kJ_mol_", labels[2])]] -
+        .data[[paste0("deltaH_kJ_mol_", labels[1])]]
+    )
+}
+
+# Re-run the complete preparation and fitting chain for several hold-up time
+# specifications (each element of `t0_scenarios` is anything accepted by
+# vh_prepare(t0_external = ...)). Returns the stacked result tables.
+vh_t0_sensitivity <- function(
+    data,
+    t0_scenarios,
+    prepare_args = list(),
+    fit_args     = list()
+) {
+
+  if (is.null(names(t0_scenarios)) || any(names(t0_scenarios) == "")) {
+    stop("`t0_scenarios` must be a named list.")
+  }
+
+  purrr::imap_dfr(t0_scenarios, function(t0_spec, nm) {
+    run <- do.call(vh_prepare, c(list(data = data, t0_external = t0_spec), prepare_args))
+    tmp <- vh_temperature_summary(run)
+    fit <- do.call(vh_fit, c(list(data = tmp), fit_args))
+    fit$results |> mutate(t0_scenario = nm, .before = 1)
+  })
 }
 
 # ---------- Fit plotter ------------------------------------------------------

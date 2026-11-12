@@ -11,11 +11,20 @@ source("../classicVantHoff/classic_vantHoff_analyzer.R")
 
 retention <- readRDS("retention_data.rds")
 
+retention <- retention |>
+  mutate(run_key = sub("__[0-9]+$", "", logical_key))
+
+retention_t0_marker <- retention |>
+  filter(compoundname == "T0")
+
+retention <- retention |> 
+  filter(compoundname != "T0")
+
 # Extracting retention data for classic van't Hoff analysis -------------------
 
 vh_run <- vh_prepare(
   retention,
-  run_id_col  = "logical_key",
+  run_id_col  = "run_key",
   strict_qc   = TRUE,
   t0_external = 2.54
 )
@@ -46,18 +55,65 @@ plot_vanthoff(
 
 # Manual filtering and data cleaning ------------------------------------------
 
+excluded_compounds <- c("Labetalol", "Propranolol", "Timolol")
+retention_filt <- retention |>
+  filter(!compoundname %in% excluded_compounds)
+
 update_lookup <- tibble::tribble(
   ~logical_key,          ~tR1,      ~fwhm1,    ~tR2,      ~fwhm2,    ~peak_detection_ok, ~manual_override,
-# example:
-# "20260811__8461__254", 4.566617,  0.550078,  6.506477,  0.646758,  TRUE,               TRUE
+  "20260811__7354__210", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7354__230", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7354__254", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7402__210", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7402__230", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7402__254", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7546__210", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7546__230", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7546__254", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7841__210", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7841__230", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7841__254", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7833__210", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7833__230", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7833__254", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7278__210", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7278__230", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7278__254", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7326__210", 3.266664,  0.106674,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7326__230", 3.266664,  0.106674,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7326__254", 3.266664,  0.106674,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7374__210", 3.319997,  0.106674,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7374__230", 3.319997,  0.106674,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7374__254", 3.319997,  0.106674,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7837__210", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7837__230", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7837__254", NA_real_,  NA_real_,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__6954__210", 47.03909,  12.17852,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__6954__230", 47.03909,  12.17852,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__6954__254", 47.03909,  12.17852,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7582__210", 29.74539,  6.517592,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7582__230", 29.74539,  6.517592,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7582__254", 29.74539,  6.517592,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__8221__210", 19.16313,  3.433821,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__8221__230", 19.16313,  3.433821,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__8221__254", 19.16313,  3.433821,  NA_real_,  NA_real_,  TRUE,               TRUE,
+  "20260811__7194__210", 5.643206,  0.926798,  10.87616,  1.496879,  TRUE,               TRUE,
+  "20260811__7194__230", 5.643206,  0.926798,  10.87616,  1.496879,  TRUE,               TRUE,
+  "20260811__7194__254", 5.643206,  0.926798,  10.87616,  1.496879,  TRUE,               TRUE,
+  "20260811__7829__210", 5.046583,  0.730104,  8.249684,  0.930132,  TRUE,               TRUE,
+  "20260811__7829__230", 5.046583,  0.730104,  8.249684,  0.930132,  TRUE,               TRUE,
+  "20260811__7829__254", 5.046583,  0.730104,  8.249684,  0.930132,  TRUE,               TRUE,
+  "20260811__8461__210", 4.566617,  0.550078,  6.506477,  0.646758,  TRUE,               TRUE,
+  "20260811__8461__230", 4.566617,  0.550078,  6.506477,  0.646758,  TRUE,               TRUE,
+  "20260811__8461__254", 4.566617,  0.550078,  6.506477,  0.646758,  TRUE,               TRUE
 )
 
-retention_filt <- retention |>
+retention_filt <- retention_filt |>
   rows_update(update_lookup, by = "logical_key", unmatched = "ignore")
 
 vh_run_filt <- vh_prepare(
   retention_filt,
-  run_id_col  = "logical_key",
+  run_id_col  = "run_key",
   strict_qc   = TRUE,
   t0_external = 2.54
 )
@@ -65,6 +121,19 @@ vh_run_filt <- vh_prepare(
 vh_temp_filt <- vh_temperature_summary(vh_run_filt)
 
 vh_filt <- vh_fit(vh_temp_filt)
+
+vh_filt$sigma_ref # dataset-level reference residual scale of ln k
+
+fit_status <- vh_fit_status_summary(vh_filt)
+fit_status
+
+shared_resid <- vh_shared_residual_check(vh_filt, by = "eluentID")
+shared_resid
+
+write.csv(fit_status,   "fit_status_summary.csv",    row.names = FALSE)
+write.csv(shared_resid, "shared_residual_check.csv", row.names = FALSE)
+write.csv(vh_filt$results |> select(where(~ !is.list(.x))),
+          "vh_results.csv", row.names = FALSE)
 
 plot_fits <- plot_vanthoff(
   vh_filt,
@@ -280,7 +349,7 @@ heatmap_Hdiff <- make_heatmap(
   row_var     = "compoundname",
   col_vars    = c("columnID", "eluentID"),
   value_var   = "deltaH_diff_signed",
-  fill_label  = expression(Delta*H[1] - Delta*H[2]~"(kJ/mol)"),
+  fill_label  = expression(Delta*H[2] - Delta*H[1]~"(kJ/mol)"),
   text_digits = 0,
   title       = expression("(B) Signed difference of"~Delta*H)
 )
