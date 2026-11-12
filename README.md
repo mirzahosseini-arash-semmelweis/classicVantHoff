@@ -12,7 +12,7 @@ This directory contains all R code scripts for the HPLC chromatographic data pro
 │   └── classic_vantHoff_analyzer.R    # Core R implementation for van 't Hoff analysis
 ├── read_analyze_data/
 │   ├── run_batch_chromReader.R        # Script for batch-reading raw HPLC chromatograms
-│   └── analyze_classic_vantHoff.R     # Script executing the van 't Hoff workflow
+│   ├── analyze_classic_vantHoff.R     # Script executing the van 't Hoff workflow
 │   └── validate_classic_vantHoff.R    # Script executing the validation of error propagation
 ├── data/                              # Sample raw chromatogram files (.arw)
 └── README.md                          # This documentation file
